@@ -1,125 +1,93 @@
-window.addEventListener('DOMContentLoaded', () => {
-  const localVideo = document.getElementById('localVideo');
-  const remoteVideo = document.getElementById('remoteVideo');
-  const nextBtn = document.getElementById('nextBtn');
+window.addEventListener("DOMContentLoaded", () => {
+  const localVideo = document.getElementById("localVideo");
+  const remoteVideo = document.getElementById("remoteVideo");
+  const nextBtn = document.getElementById("nextBtn");
 
   let localStream;
   let peerConnection;
   let ws;
-  let isInitiator = false;
 
-  const SIGNAL_SERVER_URL = 'wss://chatroulette-signal.onrender.com';
-
-  const iceConfig = {
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-  };
-
-  function startWebSocket() {
-    ws = new WebSocket(SIGNAL_SERVER_URL);
-
-    ws.onopen = () => {
-      console.log('WebSocket открыт');
-      ws.send(JSON.stringify({ type: 'join' }));
-    };
-
-    ws.onmessage = async (message) => {
-      const data = JSON.parse(message.data);
-      console.log('Сообщение от сервера:', data);
-
-      switch (data.type) {
-        case 'offer':
-          if (!peerConnection) createPeerConnection();
-          await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-          const answer = await peerConnection.createAnswer();
-          await peerConnection.setLocalDescription(answer);
-          ws.send(JSON.stringify({ type: 'answer', answer }));
-          break;
-
-        case 'answer':
-          if (peerConnection.signalingState === 'have-local-offer') {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-          }
-          break;
-
-        case 'candidate':
-          if (peerConnection) {
-            try {
-              await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-            } catch (err) {
-              console.error('Ошибка добавления кандидата:', err);
-            }
-          }
-          break;
-
-        case 'partner-found':
-          isInitiator = true;
-          createPeerConnection();
-          break;
-
-        case 'partner-left':
-          closeConnection();
-          break;
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error('WebSocket ошибка:', err);
-    };
-  }
-
-  async function startCamera() {
+  async function startLocalVideo() {
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
     } catch (err) {
-      console.error('Ошибка доступа к камере/микрофону:', err);
+      console.error("Ошибка доступа к камере:", err);
     }
   }
 
-  function createPeerConnection() {
+  function connectToServer() {
+    ws = new WebSocket("wss://chatroulette-signal.onrender.com");
+
+    ws.addEventListener("open", () => {
+      console.log("WebSocket открыт");
+      ws.send(JSON.stringify({ type: "join" }));
+    });
+
+    ws.addEventListener("message", async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case "offer":
+            await createPeerConnection();
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.offer));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            ws.send(JSON.stringify({ type: "answer", answer }));
+            break;
+
+          case "answer":
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer));
+            break;
+
+          case "candidate":
+            if (msg.candidate) {
+              await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            }
+            break;
+
+          case "partner-found":
+            createPeerConnection();
+            break;
+        }
+      } catch (err) {
+        console.warn("Ошибка при обработке сообщения:", err);
+      }
+    });
+  }
+
+  async function createPeerConnection() {
     if (peerConnection) {
       peerConnection.close();
     }
 
-    peerConnection = new RTCPeerConnection(iceConfig);
+    peerConnection = new RTCPeerConnection();
 
-    peerConnection.onicecandidate = (e) => {
-      if (e.candidate) {
-        ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
-      }
-    };
-
-    peerConnection.ontrack = (e) => {
-      remoteVideo.srcObject = e.streams[0];
-    };
-
-    localStream.getTracks().forEach(track => {
+    localStream.getTracks().forEach((track) => {
       peerConnection.addTrack(track, localStream);
     });
 
-    if (isInitiator) {
-      peerConnection.onnegotiationneeded = async () => {
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        ws.send(JSON.stringify({ type: 'offer', offer }));
-      };
-    }
+    peerConnection.ontrack = (event) => {
+      remoteVideo.srcObject = event.streams[0];
+    };
+
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        ws.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+      }
+    };
+
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: "offer", offer }));
   }
 
-  function closeConnection() {
-    if (peerConnection) {
-      peerConnection.close();
-      peerConnection = null;
-    }
+  nextBtn.addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "next" }));
     remoteVideo.srcObject = null;
-  }
+  });
 
-  nextBtn.onclick = () => {
-    closeConnection();
-    ws.send(JSON.stringify({ type: 'next' }));
-  };
-
-  console.log('🚀 Запуск камеры и WebSocket');
-  await startCamera();
-  startWebSocket();
+  startLocalVideo();
+  connectToServer();
 });
