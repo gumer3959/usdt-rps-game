@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ScaleDrone WebRTC Video Chat</title>
+  <style>
+    body { background: #222; color: #fff; font-family: sans-serif; text-align: center; }
+    video { width: 45%; margin: 10px; border: 2px solid #fff; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>ScaleDrone WebRTC Chat</h1>
+  <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+  <script>
+    const roomName = 'observable-demo-room';
+    const drone = new ScaleDrone('yiY0jFsCqH9zOyxh'); // тестовый публичный канал
+    let room;
+    let pc;
+
+    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      localVideo.srcObject = stream;
+
+      drone.on('open', error => {
+        if (error) return console.error(error);
+        room = drone.subscribe(roomName);
+        room.on('open', error => { if (error) console.error(error); });
+
+        room.on('members', members => {
+          const isOfferer = members.length === 2;
+          startWebRTC(isOfferer, stream);
+        });
+      });
+    });
+
+    function startWebRTC(isOfferer, stream) {
+      pc = new RTCPeerConnection(configuration);
+
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          sendMessage({ 'candidate': event.candidate });
+        }
+      };
+
+      pc.ontrack = event => {
+        remoteVideo.srcObject = event.streams[0];
+      };
+
+      if (isOfferer) {
+        pc.onnegotiationneeded = () => {
+          pc.createOffer().then(desc => pc.setLocalDescription(desc)).then(() => {
+            sendMessage({ 'sdp': pc.localDescription });
+          });
+        };
+      }
+
+      room.on('data', (message, client) => {
+        if (client.id === drone.clientId) return;
+
+        if (message.sdp) {
+          pc.setRemoteDescription(new RTCSessionDescription(message.sdp)).then(() => {
+            if (pc.remoteDescription.type === 'offer') {
+              pc.createAnswer().then(desc => pc.setLocalDescription(desc)).then(() => {
+                sendMessage({ 'sdp': pc.localDescription });
+              });
+            }
+          });
+        } else if (message.candidate) {
+          pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+        }
+      });
+    }
+
+    function sendMessage(message) {
+      drone.publish({ room: roomName, message });
+    }
+  </script>
+
+  <script src="https://cdn.scaledrone.com/scaledrone.min.js"></script>
+</body>
+</html>
