@@ -1,103 +1,117 @@
-console.log('🚀 Запуск камеры и WebSocket');
-
-const localVideo = document.querySelectorAll('video')[0];
-const remoteVideo = document.querySelectorAll('video')[1];
-const nextButton = document.getElementById('nextButton');
+const localVideo = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
+const nextButton = document.getElementById("nextButton");
 
 let localStream;
 let peerConnection;
 let socket;
-let reconnectTimeout;
+let isMakingOffer = false;
 
-const iceConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' }
-  ]
-};
+const signalingServer = "wss://chatroulette-signal.onrender.com"; // Адрес твоего Render WebSocket
 
-async function startLocalVideo() {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  localVideo.srcObject = localStream;
+startCamera();
+
+function startCamera() {
+  navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    .then(stream => {
+      localStream = stream;
+      localVideo.srcObject = stream;
+      connectToServer();
+    })
+    .catch(error => console.error("Ошибка доступа к камере:", error));
 }
 
-function createSocket() {
-  socket = new WebSocket('wss://chatroulette-signal.onrender.com');
+function connectToServer() {
+  socket = new WebSocket(signalingServer);
 
-  socket.onopen = () => {
-    console.log('📡 WebSocket открыт');
-    socket.send(JSON.stringify({ type: 'join' }));
-  };
+  socket.addEventListener("open", () => {
+    console.log("WebSocket открыт");
+    socket.send(JSON.stringify({ type: "join" }));
+  });
 
-  socket.onmessage = async (event) => {
+  socket.addEventListener("message", async (event) => {
+    let message;
     try {
-      const data = JSON.parse(event.data);
-      if (data.type === 'partner-found') {
-        console.log('🤝 Партнёр найден');
-        startWebRTC();
-      } else if (data.type === 'offer') {
-        console.log('📦 Получен offer', data.offer);
-        await createPeerConnection();
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        socket.send(JSON.stringify({ type: 'answer', answer }));
-      } else if (data.type === 'answer') {
-        console.log('📦 Получен answer', data.answer);
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-      } else if (data.type === 'candidate') {
-        console.log('🧊 ICE candidate получен');
+      message = JSON.parse(event.data);
+    } catch (err) {
+      console.error("Ошибка JSON:", err);
+      return;
+    }
+
+    if (message.type === "offer") {
+      await handleOffer(message.offer);
+    } else if (message.type === "answer") {
+      await handleAnswer(message.answer);
+    } else if (message.type === "candidate") {
+      if (peerConnection) {
         try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+          await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
         } catch (e) {
-          console.warn('❌ Ошибка при добавлении ICE:', e);
+          console.error("Ошибка добавления ICE:", e);
         }
       }
-    } catch (err) {
-      console.warn('Ошибка обработки сообщения:', err);
+    } else if (message.type === "partner-left") {
+      closeConnection();
     }
-  };
+  });
+
+  nextButton.addEventListener("click", () => {
+    socket.send(JSON.stringify({ type: "next" }));
+    closeConnection();
+  });
 }
 
-async function createPeerConnection() {
-  if (peerConnection) {
-    console.warn('⚠️ Предыдущий peerConnection всё ещё существует. Закрываем.');
-    peerConnection.close();
-  }
-
-  peerConnection = new RTCPeerConnection(iceConfig);
-
-  peerConnection.onicecandidate = event => {
-    if (event.candidate) {
-      socket.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
-    }
-  };
-
-  peerConnection.ontrack = event => {
-    console.log('📺 Получен медиапоток от партнёра');
-    remoteVideo.srcObject = event.streams[0];
-  };
+function createPeerConnection() {
+  peerConnection = new RTCPeerConnection();
 
   localStream.getTracks().forEach(track => {
     peerConnection.addTrack(track, localStream);
   });
+
+  peerConnection.addEventListener("track", event => {
+    remoteVideo.srcObject = event.streams[0];
+  });
+
+  peerConnection.addEventListener("icecandidate", event => {
+    if (event.candidate) {
+      socket.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+    }
+  });
+
+  peerConnection.addEventListener("negotiationneeded", async () => {
+    try {
+      isMakingOffer = true;
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      socket.send(JSON.stringify({ type: "offer", offer }));
+    } catch (e) {
+      console.error("Ошибка при создании оффера:", e);
+    } finally {
+      isMakingOffer = false;
+    }
+  });
 }
 
-async function startWebRTC() {
-  await createPeerConnection();
-
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  socket.send(JSON.stringify({ type: 'offer', offer }));
+async function handleOffer(offer) {
+  if (peerConnection) peerConnection.close();
+  createPeerConnection();
+  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await peerConnection.createAnswer();
+  await peerConnection.setLocalDescription(answer);
+  socket.send(JSON.stringify({ type: "answer", answer }));
 }
 
-nextButton.onclick = () => {
-  peerConnection?.close();
-  remoteVideo.srcObject = null;
-  socket?.close();
-  clearTimeout(reconnectTimeout);
-  setTimeout(() => {
-    createSocket();
-  }, 200);
-};
+async function handleAnswer(answer) {
+  if (!peerConnection.currentRemoteDescription) {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+  } else {
+    console.warn("Ответ уже получен");
+  }
+}
 
-startLocalVideo().then(createSocket);
+function closeConnection() {
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+}
